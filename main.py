@@ -5,7 +5,7 @@ import os
 import requests
 import uuid
 from datetime import datetime
-from google.cloud import firestore, secretmanager
+from google.cloud import firestore, secretmanager, storage
 import json
 
 try:
@@ -40,7 +40,7 @@ except Exception as e:
 
 # URL Model TensorFlow.js
 MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/penyimpanan123/model.json")
-LOCAL_MODEL_PATH = "/peyimpanan123/tmp/model.json"
+LOCAL_MODEL_PATH = "/tmp/model.json"
 
 # Fungsi untuk mengunduh dan memuat model
 def load_model_from_json(url, local_path):
