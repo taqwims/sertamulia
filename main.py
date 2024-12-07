@@ -89,11 +89,11 @@ def download_model(url, local_path):
         logging.error(f"Kesalahan download model: {e}")
         return False
 
-def load_model(local_path):
+def load_model(url):
     """Muat model TensorFlow.js"""
     try:
         logging.info("Memuat model TensorFlow.js")
-        model = tfjs.converters.load_keras_model(local_path)
+        model = tfjs.converters.load_keras_model(url)
         logging.info("Model berhasil dimuat")
         return model
     except Exception as e:
