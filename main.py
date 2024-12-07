@@ -26,7 +26,7 @@ app = Flask(__name__)
 
 # Konfigurasi dari environment variables
 MODEL_URL = os.environ.get("MODEL_URL")
-LOCAL_MODEL_PATH = "/tmp/model.json"
+LOCAL_MODEL_PATH = "/penyimpanan123/model.json"
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
 # Global variabel
