@@ -9,15 +9,17 @@ import tensorflowjs as tfjs
 import requests
 
 from flask import Flask, request, jsonify
-from google.cloud import firestore, secretmanager
+from google.cloud import storage, firestore
+from google.oauth2 import service_account
+from google.cloud.firestore import SERVER_TIMESTAMP
 
 # Konfigurasi logging
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # Output ke console
-        logging.FileHandler('/app/app.log')  # Logging ke file
+        logging.StreamHandler(),
+        logging.FileHandler('/app/app.log')
     ]
 )
 
@@ -28,44 +30,65 @@ app = Flask(__name__)
 MODEL_URL = os.environ.get("MODEL_URL")
 LOCAL_MODEL_PATH = "/penyimpanan123/model.json"
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
+GCS_BUCKET_NAME = 'penyimpanan123'
 
 # Global variabel
 db = None
 model = None
+storage_client = None
 
-def initialize_firebase():
-    """Inisialisasi Firebase dengan Secret Manager"""
-    global db
+def get_credentials_from_env_var():
+    """Mengambil kredensial dari variabel lingkungan"""
     try:
-        # Inisialisasi Secret Manager
-        client = secretmanager.SecretManagerServiceClient()
+        credentials_json = os.getenv("submission")
+        if not credentials_json:
+            logging.error("GCP_CREDENTIALS environment variable not set or empty")
+            return None
         
-        if not PROJECT_ID:
-            logging.error("GOOGLE_CLOUD_PROJECT tidak diset")
-            return None
-
-        secret_name = f"projects/{PROJECT_ID}/secrets/submission/versions/latest"
-
-        # Akses secret
-        response = client.access_secret_version(request={"name": secret_name})
-        secret_string = response.payload.data.decode("UTF-8")
-        secret_json = json.loads(secret_string)
-
-        # Inisialisasi Firebase Admin
-        if "submission" in secret_json:
-            from firebase_admin import credentials, initialize_app
-            cred = credentials.Certificate(secret_json["submission"])
-            initialize_app(cred)
-            db = firestore.Client()
-            logging.info("Firebase berhasil diinisialisasi")
-            return db
-        else:
-            logging.error("Kredensial Firebase tidak ditemukan dalam secret")
-            return None
-
+        credentials_info = json.loads(credentials_json)
+        return service_account.Credentials.from_service_account_info(credentials_info)
     except Exception as e:
-        logging.error(f"Error inisialisasi Firebase: {e}")
+        logging.error(f"Error fetching credentials: {e}")
         return None
+
+def initialize_clients():
+    """Inisialisasi Google Cloud clients"""
+    global db, storage_client
+    try:
+        credentials = get_credentials_from_env_var()
+        if credentials:
+            storage_client = storage.Client(credentials=credentials)
+            db = firestore.Client(credentials=credentials)
+            logging.info("Google Cloud clients berhasil diinisialisasi")
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Error inisialisasi clients: {e}")
+        return False
+
+def upload_to_gcs(local_path, gcs_path):
+    """Unggah file ke Google Cloud Storage"""
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(gcs_path)
+        blob.upload_from_filename(local_path)
+        logging.info(f"File {local_path} berhasil diunggah ke {gcs_path}")
+        return blob.public_url
+    except Exception as e:
+        logging.error(f"Error mengunggah ke GCS: {e}")
+        raise
+
+def save_metadata_to_firestore(collection_name, document_id, data):
+    """Simpan metadata ke Firestore"""
+    if db:
+        try:
+            data['uploaded_at'] = SERVER_TIMESTAMP
+            doc_ref = db.collection(collection_name).document(document_id)
+            doc_ref.set(data)
+            logging.info(f"Dokumen {document_id} berhasil disimpan ke Firestore")
+        except Exception as e:
+            logging.error(f"Error menyimpan ke Firestore: {e}")
+            raise
 
 def download_model(url, local_path):
     """Unduh model dari URL"""
@@ -82,7 +105,19 @@ def download_model(url, local_path):
         with open(local_path, "wb") as f:
             f.write(response.content)
         
-        logging.info("Model berhasil diunduh")
+        # Upload model ke GCS setelah diunduh
+        gcs_path = f"models/{os.path.basename(local_path)}"
+        gcs_url = upload_to_gcs(local_path, gcs_path)
+        
+        # Simpan metadata model
+        model_metadata = {
+            "model_url": gcs_url,
+            "original_url": url,
+            "downloaded_at": datetime.now().isoformat()
+        }
+        save_metadata_to_firestore("models", str(uuid.uuid4()), model_metadata)
+        
+        logging.info("Model berhasil diunduh dan diunggah ke GCS")
         return True
     
     except Exception as e:
@@ -100,36 +135,21 @@ def load_model(url):
         logging.error(f"Gagal memuat model: {e}")
         return None
 
-def store_prediction_data(data):
-    """Simpan data prediksi ke Firestore"""
-    global db
-    if db:
-        try:
-            doc_ref = db.collection("predictions").document(data['id'])
-            doc_ref.set(data)
-            logging.info("Data prediksi berhasil disimpan")
-        except Exception as e:
-            logging.error(f"Kesalahan menyimpan data prediksi: {e}")
-
 def predict_classification(model, image_bytes):
     """Lakukan klasifikasi gambar"""
     try:
-        # Preprocess gambar
         image = tf.image.decode_image(image_bytes, channels=3)
         image = tf.image.resize(image, [224, 224])
         input_tensor = tf.expand_dims(image, 0)
         input_tensor = tf.cast(input_tensor, dtype=tf.float32) / 255.0
 
-        # Prediksi
         predictions = model.predict(input_tensor)
         confidence_score = float(tf.reduce_max(predictions).numpy()) * 100
         class_result = int(tf.argmax(predictions, axis=1).numpy()[0])
 
-        # Label kelas
         classes = ["Melanocytic nevus", "Squamous cell carcinoma", "Vascular lesion"]
         label = classes[class_result]
 
-        # Penjelasan dan saran
         explanation = {
             "Melanocytic nevus": "Kondisi permukaan kulit dengan bercak warna dari sel melanosit.",
             "Squamous cell carcinoma": "Kanker kulit yang sering muncul di area terkena sinar UV.",
@@ -152,12 +172,10 @@ def predict_classification(model, image_bytes):
 def predict_handler():
     global model
 
-    # Periksa model
     if model is None:
         logging.warning("Model belum dimuat")
         return jsonify({"status": "error", "message": "Model tidak tersedia"}), 500
 
-    # Periksa keberadaan gambar
     if "image" not in request.files:
         return jsonify({"status": "gagal", "message": "Tidak ada gambar"}), 400
 
@@ -165,23 +183,25 @@ def predict_handler():
     image_bytes = image.read()
 
     try:
-        confidence_score, label, explanation, suggestion = predict_classification(model, image_bytes)
+        confidence_score, label, suggestion = predict_classification(model, image_bytes)
 
-        # Persiapkan data
+        # Upload gambar ke GCS
+        prediction_id = str(uuid.uuid4())
+        gcs_path = f"predictions/{prediction_id}.jpg"
+        image_url = upload_to_gcs(image_bytes, gcs_path)
+
         data = {
-            "id": str(uuid.uuid4()),
+            "id": prediction_id,
             "result": label,
-            "explanation": explanation,
             "suggestion": suggestion,
             "confidence": confidence_score,
             "createdAt": datetime.now().isoformat()
         }
 
-        # Simpan data
-        store_prediction_data(data)
+        # Simpan hasil prediksi ke Firestore
+        save_metadata_to_firestore("predictions", prediction_id, data)
 
-        # Respon
-        pesan = "Prediksi berhasil" if confidence_score > 50 else "Prediksi diselesaikan dengan kepercayaan rendah"
+        pesan = "Prediksi berhasil" if confidence_score > 90 else "Prediksi diselesaikan dengan kepercayaan rendah"
         return jsonify({
             "status": "sukses", 
             "message": pesan, 
@@ -193,16 +213,16 @@ def predict_handler():
         return jsonify({"status": "error", "message": f"Kesalahan internal: {e}"}), 500
 
 def setup_application():
-    """Menyiapkan aplikasi dengan inisialisasi Firebase dan model"""
-    global model, db
+    """Menyiapkan aplikasi dengan inisialisasi clients dan model"""
+    global model
     
-    # Validasi URL model
     if not MODEL_URL:
         logging.error("MODEL_URL tidak diset")
         return False
     
-    # Inisialisasi Firebase
-    db = initialize_firebase()
+    # Inisialisasi Google Cloud clients
+    if not initialize_clients():
+        return False
     
     # Download dan muat model
     if download_model(MODEL_URL, LOCAL_MODEL_PATH):
