@@ -12,21 +12,21 @@ try:
     from firebase_admin import credentials
     import firebase_admin
 except ImportError:
-    print("Firebase Admin SDK tidak diinstal. Data tidak akan disimpan ke Firestore.")
+    print("Firebase Admin SDK tidak installed. Data tidak akan disimpan ke Firestore.")
 
 app = Flask(__name__)
 
 # Inisialisasi Secret Manager dan Firebase
 try:
     client = secretmanager.SecretManagerServiceClient()
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")  # ID Proyek Google Cloud
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
     secret_name = f"projects/{project_id}/secrets/submission/versions/latest"
 
     response = client.access_secret_version(request={"name": secret_name})
     secret_string = response.payload.data.decode("UTF-8")
     secret_json = json.loads(secret_string)
 
-    if "submission" in secret_json:  # Pastikan key yang benar ada di secret
+    if "submission" in secret_json:
         cred = credentials.Certificate(secret_json["submission"])
         firebase_admin.initialize_app(cred)
         db = firestore.Client()
@@ -40,7 +40,7 @@ except Exception as e:
 
 # URL Model TensorFlow.js
 MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/penyimpanan123/model.json")
-LOCAL_MODEL_PATH = "/tmp/model.json"
+LOCAL_MODEL_PATH = "/peyimpanan123/tmp/model.json"
 
 # Fungsi untuk mengunduh dan memuat model
 def load_model_from_json(url, local_path):
@@ -51,6 +51,9 @@ def load_model_from_json(url, local_path):
         with open(local_path, "wb") as f:
             f.write(response.content)
 
+        # Simpan model ke Firestore
+        save_model_to_firestore(local_path)
+
         # Muat model menggunakan TensorFlow.js
         model = tfjs.converters.load_keras_model(local_path)
         print("Model berhasil dimuat.")
@@ -60,6 +63,17 @@ def load_model_from_json(url, local_path):
     except Exception as e:
         print(f"Error saat memuat model: {e}")
     return None
+
+def save_model_to_firestore(local_path):
+    if db:
+        try:
+            with open(local_path, "r") as f:
+                model_json = f.read()
+            doc_ref = db.collection("models").document("model_json")
+            doc_ref.set({"model": model_json})
+            print("Model berhasil disimpan ke Firestore.")
+        except Exception as e:
+            print(f"Error saat menyimpan model ke Firestore: {e}")
 
 # Muat model saat aplikasi dijalankan
 model = load_model_from_json(MODEL_URL, LOCAL_MODEL_PATH)
