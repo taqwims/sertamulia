@@ -39,7 +39,7 @@ except Exception as e:
     db = None
 
 # URL Model TensorFlow.js
-MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/penyimpanan123/model.json")
+MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/")
 LOCAL_MODEL_PATH = "/tmp/model.json"
 
 # Fungsi untuk mengunduh dan memuat model
