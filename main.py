@@ -1,26 +1,35 @@
-from flask import Flask, request, jsonify
-import tensorflow as tf
-import tensorflowjs as tfjs
 import os
-import requests
 import uuid
-from datetime import datetime
-from google.cloud import firestore, secretmanager, storage
 import json
 import logging
+from datetime import datetime
+
+import tensorflow as tf
+import tensorflowjs as tfjs
+import requests
+
+from flask import Flask, request, jsonify
+from google.cloud import firestore, secretmanager
 
 # Konfigurasi logging
-logging.basicConfig(level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Output ke console
+        logging.FileHandler('/app/app.log')  # Logging ke file
+    ]
+)
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
 
-# Konfigurasi URL Model dan Path Lokal
-MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/your-bucket/model.json")
+# Konfigurasi dari environment variables
+MODEL_URL = os.environ.get("MODEL_URL")
 LOCAL_MODEL_PATH = "/tmp/model.json"
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
-# Inisialisasi global variabel
+# Global variabel
 db = None
 model = None
 
@@ -30,13 +39,12 @@ def initialize_firebase():
     try:
         # Inisialisasi Secret Manager
         client = secretmanager.SecretManagerServiceClient()
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         
-        if not project_id:
+        if not PROJECT_ID:
             logging.error("GOOGLE_CLOUD_PROJECT tidak diset")
             return None
 
-        secret_name = f"projects/{project_id}/secrets/submission/versions/latest"
+        secret_name = f"projects/{PROJECT_ID}/secrets/submission/versions/latest"
 
         # Akses secret
         response = client.access_secret_version(request={"name": secret_name})
@@ -64,16 +72,12 @@ def download_model(url, local_path):
     try:
         logging.info(f"Mencoba mengunduh model dari: {url}")
         
-        # Tambahkan header untuk memastikan koneksi
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
         
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        
-        logging.info(f"Status download: {response.status_code}")
-        logging.info(f"Panjang konten: {len(response.content)} bytes")
         
         with open(local_path, "wb") as f:
             f.write(response.content)
@@ -81,14 +85,8 @@ def download_model(url, local_path):
         logging.info("Model berhasil diunduh")
         return True
     
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Kesalahan jaringan saat download model: {e}")
-        return False
-    except IOError as e:
-        logging.error(f"Kesalahan IO saat menyimpan model: {e}")
-        return False
     except Exception as e:
-        logging.error(f"Kesalahan tidak terduga saat download model: {e}")
+        logging.error(f"Kesalahan download model: {e}")
         return False
 
 def load_model(local_path):
@@ -101,21 +99,6 @@ def load_model(local_path):
     except Exception as e:
         logging.error(f"Gagal memuat model: {e}")
         return None
-
-def save_model_to_firestore(local_path):
-    """Simpan model ke Firestore"""
-    global db
-    if db:
-        try:
-            with open(local_path, "r") as f:
-                model_json = f.read()
-            
-            doc_ref = db.collection("models").document("model_json")
-            doc_ref.set({"model": model_json})
-            
-            logging.info("Model berhasil disimpan ke Firestore")
-        except Exception as e:
-            logging.error(f"Kesalahan saat menyimpan model ke Firestore: {e}")
 
 def store_prediction_data(data):
     """Simpan data prediksi ke Firestore"""
@@ -147,16 +130,17 @@ def predict_classification(model, image_bytes):
         label = classes[class_result]
 
         # Penjelasan dan saran
-        explanation, suggestion = "", ""
-        if label == "Melanocytic nevus":
-            explanation = "Melanocytic nevus adalah kondisi permukaan kulit memiliki bercak warna yang berasal dari sel-sel melanosit."
-            suggestion = "Segera konsultasi dengan dokter jika ada perubahan ukuran atau warna."
-        elif label == "Squamous cell carcinoma":
-            explanation = "Squamous cell carcinoma adalah jenis kanker kulit yang sering muncul di area terkena sinar UV."
-            suggestion = "Segera konsultasi dengan dokter untuk mencegah penyebaran."
-        elif label == "Vascular lesion":
-            explanation = "Vascular lesion adalah tumor atau kanker yang sering muncul di kepala dan leher."
-            suggestion = "Konsultasikan dengan dokter untuk tindakan lebih lanjut."
+        explanation = {
+            "Melanocytic nevus": "Kondisi permukaan kulit dengan bercak warna dari sel melanosit.",
+            "Squamous cell carcinoma": "Kanker kulit yang sering muncul di area terkena sinar UV.",
+            "Vascular lesion": "Tumor atau kanker yang sering muncul di kepala dan leher."
+        }.get(label, "Kondisi kulit tidak dikenali")
+
+        suggestion = {
+            "Melanocytic nevus": "Konsultasi dokter jika ada perubahan ukuran atau warna.",
+            "Squamous cell carcinoma": "Segera konsultasi untuk mencegah penyebaran.",
+            "Vascular lesion": "Konsultasikan untuk tindakan lebih lanjut."
+        }.get(label, "Disarankan pemeriksaan medis")
 
         return confidence_score, label, explanation, suggestion
 
@@ -184,16 +168,13 @@ def predict_handler():
         confidence_score, label, explanation, suggestion = predict_classification(model, image_bytes)
 
         # Persiapkan data
-        id_prediksi = str(uuid.uuid4())
-        waktu_prediksi = datetime.now().isoformat()
-
         data = {
-            "id": id_prediksi,
+            "id": str(uuid.uuid4()),
             "result": label,
             "explanation": explanation,
             "suggestion": suggestion,
             "confidence": confidence_score,
-            "createdAt": waktu_prediksi
+            "createdAt": datetime.now().isoformat()
         }
 
         # Simpan data
@@ -215,27 +196,24 @@ def setup_application():
     """Menyiapkan aplikasi dengan inisialisasi Firebase dan model"""
     global model, db
     
+    # Validasi URL model
+    if not MODEL_URL:
+        logging.error("MODEL_URL tidak diset")
+        return False
+    
     # Inisialisasi Firebase
     db = initialize_firebase()
     
     # Download dan muat model
     if download_model(MODEL_URL, LOCAL_MODEL_PATH):
         model = load_model(LOCAL_MODEL_PATH)
-        
-        # Simpan model ke Firestore jika berhasil
-        if model:
-            save_model_to_firestore(LOCAL_MODEL_PATH)
-        else:
-            logging.error("Gagal memuat model")
-    else:
-        logging.error("Gagal download model")
+        return model is not None
+    
+    return False
 
 # Jalankan setup saat aplikasi dimulai
-setup_application()
+if not setup_application():
+    logging.critical("Gagal menyiapkan aplikasi. Periksa konfigurasi.")
 
 if __name__ == "__main__":
-    app.run(
-        debug=True, 
-        host="0.0.0.0", 
-        port=int(os.environ.get("PORT", 8080))
-    )
+    app.run(host="0.0.0.0", port=8080)
