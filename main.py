@@ -55,9 +55,11 @@ def load_model_from_json(url, local_path):
         model = tfjs.converters.load_keras_model(local_path)
         print("Model berhasil dimuat.")
         return model
+    except requests.exceptions.RequestException as e:
+        print(f"Error saat mengunduh model: {e}")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        return None
+        print(f"Error saat memuat model: {e}")
+    return None
 
 # Muat model saat aplikasi dijalankan
 model = load_model_from_json(MODEL_URL, LOCAL_MODEL_PATH)
