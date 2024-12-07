@@ -61,7 +61,7 @@ def initialize_clients():
             db = firestore.Client(credentials=credentials)
             logging.info("Google Cloud clients berhasil diinisialisasi")
             return True
-        return False
+        # return False
     except Exception as e:
         logging.error(f"Error inisialisasi clients: {e}")
         return False
@@ -124,11 +124,11 @@ def download_model(url, local_path):
         logging.error(f"Kesalahan download model: {e}")
         return False
 
-def load_model(url):
+def load_model(MODEL_URL):
     """Muat model TensorFlow.js"""
     try:
         logging.info("Memuat model TensorFlow.js")
-        model = tfjs.converters.load_keras_model(url)
+        model = tf.keras.model.load_model(MODEL_URL)
         logging.info("Model berhasil dimuat")
         return model
     except Exception as e:
@@ -194,7 +194,6 @@ def predict_handler():
             "id": prediction_id,
             "result": label,
             "suggestion": suggestion,
-            "confidence": confidence_score,
             "createdAt": datetime.now().isoformat()
         }
 
@@ -203,8 +202,6 @@ def predict_handler():
 
         pesan = "Prediksi berhasil" if confidence_score > 90 else "Prediksi diselesaikan dengan kepercayaan rendah"
         return jsonify({
-            "status": "sukses", 
-            "message": pesan, 
             "data": data
         }), 201
 
