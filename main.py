@@ -7,97 +7,129 @@ import uuid
 from datetime import datetime
 from google.cloud import firestore, secretmanager, storage
 import json
+import logging
 
-try:
-    from firebase_admin import credentials
-    import firebase_admin
-except ImportError:
-    print("Firebase Admin SDK tidak installed. Data tidak akan disimpan ke Firestore.")
+# Konfigurasi logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Inisialisasi aplikasi Flask
 app = Flask(__name__)
 
-# Inisialisasi Secret Manager dan Firebase
-try:
-    client = secretmanager.SecretManagerServiceClient()
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-    secret_name = f"projects/{project_id}/secrets/submission/versions/latest"
-
-    response = client.access_secret_version(request={"name": secret_name})
-    secret_string = response.payload.data.decode("UTF-8")
-    secret_json = json.loads(secret_string)
-
-    if "submission" in secret_json:
-        cred = credentials.Certificate(secret_json["submission"])
-        firebase_admin.initialize_app(cred)
-        db = firestore.Client()
-    else:
-        print("Kredensial Firebase tidak ditemukan dalam secret.")
-        db = None
-
-except Exception as e:
-    print(f"Error in initializing Firebase/Secret Manager: {e}")
-    db = None
-
-# URL Model TensorFlow.js
-MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/")
+# Konfigurasi URL Model dan Path Lokal
+MODEL_URL = os.environ.get("MODEL_URL", "https://storage.googleapis.com/your-bucket/model.json")
 LOCAL_MODEL_PATH = "/tmp/model.json"
 
-# Fungsi untuk mengunduh dan memuat model
-def load_model_from_json(url, local_path):
+# Inisialisasi global variabel
+db = None
+model = None
+
+def initialize_firebase():
+    """Inisialisasi Firebase dengan Secret Manager"""
+    global db
     try:
-        # Unduh model.json
-        response = requests.get(url)
+        # Inisialisasi Secret Manager
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        
+        if not project_id:
+            logging.error("GOOGLE_CLOUD_PROJECT tidak diset")
+            return None
+
+        secret_name = f"projects/{project_id}/secrets/submission/versions/latest"
+
+        # Akses secret
+        response = client.access_secret_version(request={"name": secret_name})
+        secret_string = response.payload.data.decode("UTF-8")
+        secret_json = json.loads(secret_string)
+
+        # Inisialisasi Firebase Admin
+        if "submission" in secret_json:
+            from firebase_admin import credentials, initialize_app
+            cred = credentials.Certificate(secret_json["submission"])
+            initialize_app(cred)
+            db = firestore.Client()
+            logging.info("Firebase berhasil diinisialisasi")
+            return db
+        else:
+            logging.error("Kredensial Firebase tidak ditemukan dalam secret")
+            return None
+
+    except Exception as e:
+        logging.error(f"Error inisialisasi Firebase: {e}")
+        return None
+
+def download_model(url, local_path):
+    """Unduh model dari URL"""
+    try:
+        logging.info(f"Mencoba mengunduh model dari: {url}")
+        
+        # Tambahkan header untuk memastikan koneksi
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
+        
+        logging.info(f"Status download: {response.status_code}")
+        logging.info(f"Panjang konten: {len(response.content)} bytes")
+        
         with open(local_path, "wb") as f:
             f.write(response.content)
-
-        # Simpan model ke Firestore
-        save_model_to_firestore(local_path)
-
-        # Muat model menggunakan TensorFlow.js
-        model = tfjs.converters.load_keras_model(local_path)
-        print("Model berhasil dimuat.")
-        return model
+        
+        logging.info("Model berhasil diunduh")
+        return True
+    
     except requests.exceptions.RequestException as e:
-        print(f"Error saat mengunduh model: {e}")
+        logging.error(f"Kesalahan jaringan saat download model: {e}")
+        return False
+    except IOError as e:
+        logging.error(f"Kesalahan IO saat menyimpan model: {e}")
+        return False
     except Exception as e:
-        print(f"Error saat memuat model: {e}")
-    return None
+        logging.error(f"Kesalahan tidak terduga saat download model: {e}")
+        return False
+
+def load_model(local_path):
+    """Muat model TensorFlow.js"""
+    try:
+        logging.info("Memuat model TensorFlow.js")
+        model = tfjs.converters.load_keras_model(local_path)
+        logging.info("Model berhasil dimuat")
+        return model
+    except Exception as e:
+        logging.error(f"Gagal memuat model: {e}")
+        return None
 
 def save_model_to_firestore(local_path):
+    """Simpan model ke Firestore"""
+    global db
     if db:
         try:
             with open(local_path, "r") as f:
                 model_json = f.read()
+            
             doc_ref = db.collection("models").document("model_json")
             doc_ref.set({"model": model_json})
-            print("Model berhasil disimpan ke Firestore.")
+            
+            logging.info("Model berhasil disimpan ke Firestore")
         except Exception as e:
-            print(f"Error saat menyimpan model ke Firestore: {e}")
+            logging.error(f"Kesalahan saat menyimpan model ke Firestore: {e}")
 
-# Muat model saat aplikasi dijalankan
-model = load_model_from_json(MODEL_URL, LOCAL_MODEL_PATH)
-
-class ClientError(Exception):
-    def __init__(self, message, status_code=400):
-        super().__init__(message)
-        self.status_code = status_code
-        self.name = "ClientError"
-
-class InputError(ClientError):
-    def __init__(self, message):
-        super().__init__(message)
-        self.name = "InputError"
-
-def store_data(id, data):
+def store_prediction_data(data):
+    """Simpan data prediksi ke Firestore"""
+    global db
     if db:
         try:
-            doc_ref = db.collection("predictions").document(id)
+            doc_ref = db.collection("predictions").document(data['id'])
             doc_ref.set(data)
+            logging.info("Data prediksi berhasil disimpan")
         except Exception as e:
-            print(f"Error menyimpan data ke Firestore: {e}")
+            logging.error(f"Kesalahan menyimpan data prediksi: {e}")
 
 def predict_classification(model, image_bytes):
+    """Lakukan klasifikasi gambar"""
     try:
         # Preprocess gambar
         image = tf.image.decode_image(image_bytes, channels=3)
@@ -129,41 +161,81 @@ def predict_classification(model, image_bytes):
         return confidence_score, label, explanation, suggestion
 
     except Exception as e:
-        raise InputError(f"Kesalahan input: {str(e)}")
+        logging.error(f"Kesalahan prediksi: {e}")
+        raise ValueError(f"Gagal melakukan prediksi: {str(e)}")
 
 @app.route("/predict", methods=["POST"])
-def post_predict_handler():
-    if model is None:
-        return jsonify({"status": "error", "message": "Model not loaded"}), 500
+def predict_handler():
+    global model
 
+    # Periksa model
+    if model is None:
+        logging.warning("Model belum dimuat")
+        return jsonify({"status": "error", "message": "Model tidak tersedia"}), 500
+
+    # Periksa keberadaan gambar
     if "image" not in request.files:
-        return jsonify({"status": "fail", "message": "No image provided"}), 400
+        return jsonify({"status": "gagal", "message": "Tidak ada gambar"}), 400
 
     image = request.files["image"]
     image_bytes = image.read()
 
     try:
-        confidence_score, label, suggestion = predict_classification(model, image_bytes)
+        confidence_score, label, explanation, suggestion = predict_classification(model, image_bytes)
 
-        id = str(uuid.uuid4())
-        created_at = datetime.now().isoformat()
+        # Persiapkan data
+        id_prediksi = str(uuid.uuid4())
+        waktu_prediksi = datetime.now().isoformat()
 
         data = {
-            "id": id,
+            "id": id_prediksi,
             "result": label,
+            "explanation": explanation,
             "suggestion": suggestion,
-            "createdAt": created_at,
+            "confidence": confidence_score,
+            "createdAt": waktu_prediksi
         }
 
-        store_data(id, data)
+        # Simpan data
+        store_prediction_data(data)
 
-        message = "Prediction successful." if confidence_score > 50 else "Prediction completed but below confidence threshold."
-        return jsonify({"status": "success", "message": message, "data": data}), 201
+        # Respon
+        pesan = "Prediksi berhasil" if confidence_score > 50 else "Prediksi diselesaikan dengan kepercayaan rendah"
+        return jsonify({
+            "status": "sukses", 
+            "message": pesan, 
+            "data": data
+        }), 201
 
-    except InputError as e:
-        return jsonify({"status": "fail", "message": str(e)}), e.status_code
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Internal Server Error: {e}"}), 500
+        logging.error(f"Kesalahan prediksi: {e}")
+        return jsonify({"status": "error", "message": f"Kesalahan internal: {e}"}), 500
+
+def setup_application():
+    """Menyiapkan aplikasi dengan inisialisasi Firebase dan model"""
+    global model, db
+    
+    # Inisialisasi Firebase
+    db = initialize_firebase()
+    
+    # Download dan muat model
+    if download_model(MODEL_URL, LOCAL_MODEL_PATH):
+        model = load_model(LOCAL_MODEL_PATH)
+        
+        # Simpan model ke Firestore jika berhasil
+        if model:
+            save_model_to_firestore(LOCAL_MODEL_PATH)
+        else:
+            logging.error("Gagal memuat model")
+    else:
+        logging.error("Gagal download model")
+
+# Jalankan setup saat aplikasi dimulai
+setup_application()
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(
+        debug=True, 
+        host="0.0.0.0", 
+        port=int(os.environ.get("PORT", 8080))
+    )
