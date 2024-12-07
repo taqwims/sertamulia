@@ -2,6 +2,8 @@ Flask==2.2.2
 Werkzeug==2.2.2
 tensorflow==2.13.0
 tensorflowjs==4.8.0
+jax==0.4.13
+jaxlib==0.4.13
 google-cloud-storage==2.8.0
 google-cloud-firestore==2.11.0
 google-cloud-secret-manager==2.16.0
